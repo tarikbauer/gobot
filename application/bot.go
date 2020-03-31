@@ -1,120 +1,127 @@
 package application
 
 import (
-	"github.com/tarikbauer/gobot/infrastructure/flusher"
+	"bytes"
+	"context"
+	"html/template"
 	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
+
 	"github.com/tarikbauer/gobot/domain"
 )
 
 type Bot interface {
-	Run()
+	Run(ctx context.Context) error
+	Render(ctx context.Context) ([]byte, error)
 }
 
 type botService struct {
-	domain.Flusher
+	domain.Repository
 	domain.Consumer
-	logger logrus.Logger
 	strategies []*domain.Strategy
 }
 
 func NewBotService(
-	logger logrus.Logger,
-	flusher domain.Flusher,
 	consumer domain.Consumer,
+	repository domain.Repository,
 	strategies ... *domain.Strategy,
 ) Bot {
 	return &botService{
-		logger:     logger,
-		Flusher:    flusher,
+		Repository: repository,
 		Consumer:   consumer,
 		strategies: strategies,
 	}
 }
 
-func (b *botService) flushStrategies(strategies []domain.StrategyData, wg *sync.WaitGroup, c chan<- error) {
+func (b *botService) flushStrategy(strategy domain.StrategyData, wg *sync.WaitGroup, c chan<- error) {
 	defer wg.Done()
-	var operation domain.Operation = "application.bot.flushStrategy"
-	err := b.FlushStrategies(strategies)
-	if err != nil {
-		c <- domain.NewError(operation, domain.Unavailable, logrus.ErrorLevel, err)
-	} else {
-		c <- nil
-	}
+	c <- b.FlushStrategy(strategy)
+
 }
 
-func (b *botService) flushCandleSticks(candleSticks []domain.CandleStickData, wg *sync.WaitGroup, c chan<- error) {
+func (b *botService) flushCandleSticks(candleSticks []domain.CandleStick, wg *sync.WaitGroup, c chan<- error) {
 	defer wg.Done()
-	var operation domain.Operation = "application.bot.flushData"
-	err := b.FlushCandleSticks(candleSticks)
+	c <- b.FlushCandleSticks(candleSticks)
+}
+
+func (b *botService) Render(ctx context.Context) ([]byte, error) {
+	var contents []data
+	logger := ctx.Value("logger").(logrus.Logger)
+	tmpl := template.New("CandleStick Chart")
+	tmpl, _ = tmpl.Parse(html)
+	buf := bytes.NewBuffer([]byte{})
+	logger.Info("getting candlesticks")
+	candleSticks, err := b.RetrieveCandleSticks()
 	if err != nil {
-		c <- domain.NewError(operation, domain.Unavailable, logrus.ErrorLevel, err)
-	} else {
-		c <- nil
+		return []byte{}, err
 	}
-
-}
-
-func (b *botService) appendStrategy(strategies *[]domain.StrategyData, candleStick domain.CandleStick, strategy *domain.Strategy) {
-	s := *strategy
-	s.Append(candleStick)
-	result, buy, sell := s.GetInfo()
-	*strategies = append(*strategies, domain.StrategyData{
-		Buy:    buy,
-		Sell:   sell,
-		Result: result,
-		Date:   candleStick.OpenTime.Format(time.RFC3339),
-	})
-}
-
-func (b *botService) appendCandleStick(candleSticksData *[]domain.CandleStickData, candleStick domain.CandleStick) {
-	*candleSticksData = append(*candleSticksData, domain.CandleStickData{
-		Symbol:   b.GetSymbol(),
-		Low:      candleStick.Low,
-		High:     candleStick.High,
-		Open:     candleStick.Open,
-		Close:    candleStick.Close,
-		Interval: b.GetInterval().String(),
-		OpenTime: candleStick.OpenTime.Format(time.RFC3339),
-	})
-}
-
-// TODO: improve performance
-func (b *botService) Run() {
-	var lastAt time.Time
-	var operation domain.Operation = "application.bot.Run"
-	log := b.logger.WithFields(logrus.Fields{"symbol": b.GetSymbol(), "interval": b.GetInterval()})
-	log.Info("starting bot")
-	for {
-		sleep, candleSticks, err := b.GetData()
-		t := time.Now()
-		if err != nil {
-			log.Error(domain.NewError(operation, domain.Unavailable, logrus.ErrorLevel, err))
-			break
+	for _, candleStick := range candleSticks {
+		var results []float64
+		for _, strategy := range b.strategies {
+			s := *strategy
+			logger.WithFields(logrus.Fields{"strategy": s.String()}).Info("getting strategy")
+			strategyData, err := b.RetrieveStrategy(s.String(), candleStick.OpenTime)
+			if err != nil {
+				return []byte{}, err
+			}
+			results = append(results, strategyData.Result)
 		}
-		var strategies []domain.StrategyData
-		var candleSticksData []domain.CandleStickData
+		contents = append(contents, data{
+			ID:     "",
+			Low:    candleStick.Low,
+			Open:   candleStick.Open,
+			Close:  candleStick.Close,
+			High:   candleStick.High,
+			Results: results,
+		})
+	}
+	_ = tmpl.Execute(buf, contents)
+	return buf.Bytes(), nil
+}
+
+func (b *botService) Run(ctx context.Context) (err error) {
+	logger := ctx.Value("logger").(logrus.Logger)
+	var lastAt time.Time
+	for {
+		c := make(chan error)
+		wg := sync.WaitGroup{}
+		logger.Info("fetching data")
+		candleSticks, err := b.GetData()
+		if err != nil {
+			logger.Error(err)
+			return err
+		}
+		logger.Info("data fetched")
+		wg.Add(1)
+		go b.flushCandleSticks(candleSticks, &wg, c)
 		for _, candleStick := range candleSticks {
 			if lastAt.After(candleStick.OpenTime) || lastAt == candleStick.OpenTime {
 				continue
 			}
 			lastAt = candleStick.OpenTime
-			b.appendCandleStick(&candleSticksData, candleStick)
 			for _, strategy := range b.strategies {
-				b.appendStrategy(&strategies, candleStick, strategy)
+				wg.Add(1)
+				s := *strategy
+				result, buy, sell := s.GetInfo()
+				go b.flushStrategy(domain.StrategyData{
+					Buy:    buy,
+					Sell:   sell,
+					Result: result,
+					Name: s.String(),
+					Date:   candleStick.OpenTime,
+				}, &wg, c)
 			}
 		}
-		_ = b.Flush(strategies, candleSticksData)
-		log.Info("strategies and data flushed")
-		flusher.Render()
-		log.Info("chart rendered")
-		sleep -= time.Since(t)
-		if sleep > 0 {
-			log.Info("sleeping for ", sleep)
-			time.Sleep(sleep)
+		wg.Wait()
+		close(c)
+		for err = range c {
+			if err != nil {
+				logger.Error(err)
+				return err
+			}
 		}
+		logger.Info("data flushed")
 	}
-	log.Info("stopping bot")
 }

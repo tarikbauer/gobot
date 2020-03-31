@@ -1,9 +1,15 @@
 package domain
 
-import "time"
+import "errors"
+
+var (
+	InvalidConsumedContent = errors.New("invalid consumed content")
+	UnexpectedResponseFormat = errors.New("unexpected response format")
+)
 
 type Consumer interface {
+	GetLimit() int
 	GetSymbol() string
 	GetInterval() Interval
-	GetData() (sleep time.Duration, candleStick []CandleStick, err error)
+	GetData() (candleStick []CandleStick, err error)
 }

@@ -1,4 +1,4 @@
-package infrastructure
+package strategies
 
 import "github.com/tarikbauer/gobot/domain"
 

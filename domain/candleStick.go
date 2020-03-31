@@ -5,14 +5,14 @@ import "time"
 type Interval string
 
 var (
-	MINUTE Interval = "1m"
-	FIVE_MINUTES Interval = "5m"
-	HALF_HOUR Interval = "30m"
-	HOUR Interval = "1h"
-	FOUR_HOURS Interval = "4h"
-	HALF_DAY Interval = "12h"
-	DAY Interval = "1d"
-	WEEK Interval = "1w"
+	Minute Interval = "1m"
+	FiveMinutes Interval = "5m"
+	HalfHour Interval = "30m"
+	Hour Interval = "1h"
+	FourHours Interval = "4h"
+	HalfDay Interval = "12h"
+	Day Interval = "1d"
+	Week Interval = "1w"
 )
 
 func (i Interval) String() string {
@@ -43,9 +43,9 @@ func (i Interval) Duration() time.Duration {
 }
 
 type CandleStick struct {
-	Low float64
-	High float64
-	Open float64
-	Close float64
-	OpenTime time.Time
+	Low float64 `json:"low"`
+	High float64 `json:"high"`
+	Open float64 `json:"open"`
+	Close float64 `json:"close"`
+	OpenTime time.Time `json:"open_time"`
 }
